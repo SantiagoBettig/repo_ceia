@@ -1,2 +1,6 @@
+# Carpetas a ignorar
+_old/
+
+# Archivos a ignorar
 *.csv
 *.xlsx
