@@ -19,25 +19,18 @@ Notas sobre la conversión:
   mantiene igual al notebook original — no se cambió ningún criterio metodológico.
 """
 
-import os
 import re
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import s3fs
+
+from src.common.storage import obtener_fs
 
 
 # ---------------------------------------------------------------------------
 # 1. Configuración
 # ---------------------------------------------------------------------------
-
-# Estas variables ya están disponibles en el contenedor de Airflow (se las
-# pasamos en el docker-compose.yml). Si corrés el script suelto fuera de
-# Airflow, exportalas antes en tu terminal.
-MINIO_ENDPOINT = os.environ["MLFLOW_S3_ENDPOINT_URL"]   # ej: http://minio:9000
-MINIO_KEY = os.environ["AWS_ACCESS_KEY_ID"]
-MINIO_SECRET = os.environ["AWS_SECRET_ACCESS_KEY"]
 
 BUCKET_CRUDO = "datasets-crudos"
 BUCKET_GENERADO = "datasets-generados"
@@ -48,7 +41,7 @@ FILE_PATTERNS = {
     "fatalities": re.compile(r"StormEvents_fatalities-.*\.csv$", re.IGNORECASE),
 }
 
-# CPI-U promedio anual, base 2025. Fuente: https://www.in2013dollars.com/us-cpi
+# CPI-U promedio anual, base 2020. Fuente: https://www.in2013dollars.com/us-cpi
 CPI_U = {
     1970: 38.8, 1971: 40.5, 1972: 41.8, 1973: 44.4, 1974: 49.3, 1975: 53.8,
     1976: 56.9, 1977: 60.6, 1978: 65.2, 1979: 72.6, 1980: 82.4, 1981: 90.9,
@@ -58,10 +51,9 @@ CPI_U = {
     2000: 172.2, 2001: 177.1, 2002: 179.9, 2003: 184.0, 2004: 188.9, 2005: 195.3,
     2006: 201.6, 2007: 207.3, 2008: 215.3, 2009: 214.5, 2010: 218.1, 2011: 224.9,
     2012: 229.6, 2013: 233.0, 2014: 236.7, 2015: 237.0, 2016: 240.0, 2017: 245.1,
-    2018: 251.1, 2019: 255.7, 2020: 258.8, 2021: 271.0, 2022: 292.7, 2023: 304.7,
-    2024: 313.7, 2025: 322.1, 2026: 322.1,
+    2018: 251.1, 2019: 255.7, 2020: 258.8,
 }
-CPI_BASE = CPI_U[2025]
+CPI_BASE = CPI_U[2020]
 
 # Región climática aproximada a partir del estado.
 REGION_MAP = {
@@ -112,22 +104,13 @@ MASTER_COLUMNS = [
     "TOTAL_DEATHS", "TOTAL_INJURIES", "TOTAL_CASUALTIES",
     "HAS_FATALITIES", "HAS_CASUALTIES",
     # Targets económicos y trazabilidad
-    "DAMAGE_REAL_2025", "DAMAGE_CLASS",
+    "DAMAGE_REAL_2020", "DAMAGE_CLASS",
 ]
 
 
 # ---------------------------------------------------------------------------
 # 2. Descubrimiento y carga de archivos crudos (desde MinIO)
 # ---------------------------------------------------------------------------
-
-def obtener_fs():
-    """Crea la conexión a MinIO vía s3fs, reutilizable en todo el script."""
-    return s3fs.S3FileSystem(
-        key=MINIO_KEY,
-        secret=MINIO_SECRET,
-        client_kwargs={"endpoint_url": MINIO_ENDPOINT},
-    )
-
 
 def discover_files(fs, bucket):
     """Devuelve un dict {tipo: [keys]} escaneando TODO el bucket por nombre de
@@ -253,7 +236,7 @@ def eda_vista_general(details):
     print(details["BEGIN_DATE_TIME"].dt.year.value_counts().sort_index().head(20))
     print(details["BEGIN_DATE_TIME"].dt.year.value_counts().sort_index().tail(20))
 
-    futuros = details[details["BEGIN_DATE_TIME"] > "2026-12-31"]
+    futuros = details[details["BEGIN_DATE_TIME"] > "2020-12-31"]
     print(f"\nEventos con fecha futura: {len(futuros):,}")
     print(futuros[["EVENT_ID", "YEAR", "BEGIN_DATE_TIME"]].head(10))
 
@@ -647,13 +630,13 @@ def resumen_tasas_base(df):
 # ---------------------------------------------------------------------------
 
 def ajustar_por_inflacion(df):
-    """Agrega DAMAGE_REAL_2025: daño histórico convertido a USD comparables de 2025."""
+    """Agrega DAMAGE_REAL_2020: daño histórico convertido a USD comparables de 2020."""
     year = df["YEAR"] if "YEAR" in df.columns else df["BEGIN_DATE_TIME"].dt.year
     cpi = year.map(CPI_U).fillna(CPI_BASE)
-    df["DAMAGE_REAL_2025"] = df["TOTAL_DAMAGE_USD"] * (CPI_BASE / cpi)
+    df["DAMAGE_REAL_2020"] = df["TOTAL_DAMAGE_USD"] * (CPI_BASE / cpi)
 
     mask = df["TOTAL_DAMAGE_USD"] > 0
-    print(df.loc[mask, ["TOTAL_DAMAGE_USD", "DAMAGE_REAL_2025"]]
+    print(df.loc[mask, ["TOTAL_DAMAGE_USD", "DAMAGE_REAL_2020"]]
           .describe(percentiles=[.5, .9, .99]).round(0))
     return df
 
@@ -664,7 +647,7 @@ def construir_target_damage_class(df):
     Se usa una definición explícita para que la clase 0 contenga exclusivamente
     daño = 0 (no confundir con "no reportado", que queda NaN).
     """
-    damage = df["DAMAGE_REAL_2025"]
+    damage = df["DAMAGE_REAL_2020"]
 
     conditions = [
         damage.eq(0),
@@ -689,7 +672,7 @@ def construir_target_damage_class(df):
         4: "Catastrófico (>1M)",
     }
 
-    modeling_mask = df["DAMAGE_REAL_2025"].notna()
+    modeling_mask = df["DAMAGE_REAL_2020"].notna()
     print(f"Eventos con daño reportado: {modeling_mask.sum():,}")
     print(f"Eventos sin daño reportado: {(~modeling_mask).sum():,}")
     print("\nDistribución del target entre eventos con daño reportado:")
@@ -728,10 +711,10 @@ def validar_dataset(storm_events_clean_master, storm_events_damage_modeling_base
     """Chequeos de coherencia antes de exportar. Lanza AssertionError si algo falla."""
     assert storm_events_clean_master["EVENT_ID"].is_unique, "EVENT_ID debe ser único."
     assert storm_events_damage_modeling_base["DAMAGE_CLASS"].notna().all()
-    assert storm_events_damage_modeling_base["DAMAGE_REAL_2025"].notna().all()
+    assert storm_events_damage_modeling_base["DAMAGE_REAL_2020"].notna().all()
     assert storm_events_damage_modeling_base.loc[
         storm_events_damage_modeling_base["DAMAGE_CLASS"] == 0,
-        "DAMAGE_REAL_2025"
+        "DAMAGE_REAL_2020"
     ].eq(0).all(), "La clase 0 debe contener únicamente daño exactamente igual a cero."
     assert "MAGNITUDE_ZSCORE" not in storm_events_clean_master.columns
     assert "IS_MARINE" not in storm_events_clean_master.columns

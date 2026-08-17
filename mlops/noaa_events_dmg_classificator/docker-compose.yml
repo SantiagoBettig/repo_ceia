@@ -56,6 +56,7 @@ services:
         mc mb --ignore-existing local/mlflow-artifacts;
         mc mb --ignore-existing local/datasets-crudos;
         mc mb --ignore-existing local/datasets-generados;
+        mc mb --ignore-existing local/datasets-splits;
         exit 0;
         "
 
