@@ -1,6 +1,16 @@
 # Carpetas a ignorar
 _old/
+.venv/
 
 # Archivos a ignorar
 *.csv
 *.xlsx
+
+# Datasets descargados por las notebooks (se re-descargan al correrlas)
+songs_dataset/
+songs_dataset.zip
+spa-eng/
+spa-eng.zip
+gloveembedding.pkl
+modelos_desafio_4/
+procesamiento_lenguaje_natural/desafios/modelos/
